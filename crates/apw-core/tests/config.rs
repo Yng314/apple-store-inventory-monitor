@@ -318,12 +318,12 @@ fn 恰好卡在上限的文件仍然能读出来() {
 fn 读出来的设置会被规范化() {
     let dir = 临时目录::new("normalize");
     let path = dir.设置路径();
-    // 手工编辑或旧版本留下的非法内容：地区认不出、间隔小到必被风控、目标重复。
+    // 手工编辑或旧版本留下的非法内容：地区认不出、间隔为 0、目标重复。
     fs::write(
         &path,
         r#"{
           "locale": "de_DE",
-          "intervalSeconds": 1,
+          "intervalSeconds": 0,
           "targets": [
             {"locale":"zh_CN","storeNumber":"R683","storeTitle":"上海-环球港","partNumber":"MG724CH/A","productName":"x"},
             {"locale":"zh_CN","storeNumber":"R683","storeTitle":"上海-环球港","partNumber":"MG724CH/A","productName":"x"}
@@ -359,7 +359,7 @@ fn 保存不改动调用方持有的数据() {
 
     let mine = Settings {
         locale: "de_DE".into(),
-        interval_seconds: 1,
+        interval_seconds: 0,
         targets: vec![
             目标("R683", "MG724CH/A"),
             目标("R683", "MG724CH/A"),

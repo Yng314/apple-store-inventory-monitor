@@ -719,7 +719,8 @@ export default function App() {
     <TooltipProvider delayDuration={180}>
       <div className="app-canvas min-h-screen text-foreground">
         <main className="flex min-h-screen w-full max-w-none flex-col gap-4 overflow-x-hidden px-5 py-5 min-[980px]:h-screen min-[980px]:overflow-hidden">
-          <header className="surface-panel flex shrink-0 items-center justify-between gap-5 px-5 py-4">
+          {/* 宽屏用左右等宽的三栏，中间一栏始终居中，不随右侧状态文字的长短左右移动。 */}
+          <header className="surface-panel flex shrink-0 items-center justify-between gap-5 px-5 py-4 min-[860px]:grid min-[860px]:grid-cols-[1fr_auto_1fr]">
             <div className="flex min-w-0 items-center gap-3.5">
               <div className="brand-mark" aria-hidden="true">
                 <Radar className="size-5" strokeWidth={1.8} />
@@ -777,14 +778,14 @@ export default function App() {
               </Tooltip>
             </div>
 
-            <div className="flex shrink-0 items-center gap-2.5">
+            <div className="flex shrink-0 items-center gap-2.5 justify-self-end">
               <div className="status-pill" role="status" aria-live="polite">
                 <span
                   className={`size-2 rounded-full ${ui.running ? browserFailure !== null ? "bg-destructive" : "bg-in-stock shadow-[0_0_12px_var(--in-stock)]" : "bg-muted-foreground/55"}`}
                   aria-hidden="true"
                 />
                 <span className="hidden text-xs text-muted-foreground sm:inline">监控状态</span>
-                <span className="text-sm font-medium">{ui.running ? browserFailure !== null ? browserRunningLabel : runningLabel : "已暂停"}</span>
+                <span className="text-sm font-medium tabular-nums">{ui.running ? browserFailure !== null ? browserRunningLabel : runningLabel : "已暂停"}</span>
               </div>
               {ui.running && ui.cooling && (
                 <Button
@@ -1208,7 +1209,7 @@ export default function App() {
                     <Input
                       id="interval"
                       type="number"
-                      min={5}
+                      min={1}
                       className="control-surface select-text pr-12 tabular-nums"
                       value={intervalValue}
                       onChange={(event) => setIntervalDraft(event.target.valueAsNumber)}
