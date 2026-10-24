@@ -7,7 +7,7 @@
 //! 选择策略是「粘住当前线路」：同一出口配合同一套浏览器 Cookie 持续访问最像真实
 //! 用户，每次切换还要重新建立连接和页面校验。只有当前线路进入冷却时才换下一条。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// 冷却档位：探测仍被拒绝时逐级延长，最长 30 分钟。
@@ -91,8 +91,18 @@ impl RoutePool {
     /// 选出这次请求该用的线路：当前线路可用就继续用；否则从它之后按顺序找第一条
     /// 可用线路。全部冷却时返回 `None`。
     pub fn choose(&self, site: &str, now: Instant) -> Option<&str> {
+        self.choose_except(site, now, &HashSet::new())
+    }
+
+    /// 与 [`Self::choose`] 相同，但跳过 `skip` 中的线路。
+    ///
+    /// 连不通的标记只有 [`UNREACHABLE_COOLDOWN`]，节点很多时逐个测完已经超过这个
+    /// 时间，最先跳过的节点会重新变成可用。调用方用 `skip` 记下本轮已经测不通的
+    /// 节点，才不会绕回去重测而永远走不到后面的节点。
+    pub fn choose_except(&self, site: &str, now: Instant, skip: &HashSet<String>) -> Option<&str> {
+        let usable = |route: &str| !skip.contains(route) && self.is_available(route, site, now);
         if let Some(active) = self.active()
-            && self.is_available(active, site, now)
+            && usable(active)
         {
             return Some(active);
         }
@@ -103,7 +113,7 @@ impl RoutePool {
             .map_or(0, |index| index + 1);
         (0..self.routes.len())
             .map(|offset| &self.routes[(start + offset) % self.routes.len()])
-            .find(|route| self.is_available(route, site, now))
+            .find(|route| usable(route))
             .map(String::as_str)
     }
 
@@ -297,6 +307,22 @@ mod tests {
         );
         // 连不通不计入 Apple 冷却档位。
         assert_eq!(pool.block("香港01", SITE, now), COOLDOWN_STEPS[0]);
+    }
+
+    #[test]
+    fn 跳过本轮测不通的节点即使短暂跳过已到期() {
+        let now = Instant::now();
+        let mut pool = pool(&["香港01", "日本01", "新加坡01"]);
+        pool.set_active(Some("香港01".into()));
+        pool.block("香港01", SITE, now);
+        pool.mark_unreachable("日本01", now);
+        let skip = HashSet::from(["日本01".to_string()]);
+        let later = now + UNREACHABLE_COOLDOWN;
+        // 短暂跳过已经到期，不排除的话会绕回去重测日本01。
+        assert_eq!(pool.choose(SITE, later), Some("日本01"));
+        assert_eq!(pool.choose_except(SITE, later, &skip), Some("新加坡01"));
+        let skip = HashSet::from(["日本01".to_string(), "新加坡01".to_string()]);
+        assert_eq!(pool.choose_except(SITE, later, &skip), None);
     }
 
     #[test]
