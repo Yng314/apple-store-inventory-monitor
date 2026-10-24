@@ -1771,8 +1771,13 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用启动失败")
-        .run(|app, event| {
-            if let RunEvent::Exit = event {
+        .run(|app, event| match event {
+            // 关窗口只是收进托盘。之后点 Dock 图标或在访达里再打开一次，macOS
+            // 只激活已在运行的进程、发出 Reopen，不经过单实例插件，不在这里把
+            // 窗口叫回来就什么都看不到。
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => reveal_window(app),
+            RunEvent::Exit => {
                 // Dock 图标的「退出」、Cmd+Q 和应用菜单的退出都不经过托盘菜单，
                 // 系统直接结束进程。这里是所有退出方式的最后一站：不在这里收尾，
                 // 查询用的无头浏览器和下单浏览器都会留在后台。托盘退出已经清理
@@ -1781,6 +1786,7 @@ pub fn run() {
                     let _ = tokio::time::timeout(EXIT_CLEANUP_TIMEOUT, release_browsers(app)).await;
                 });
             }
+            _ => {}
         });
 }
 
