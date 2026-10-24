@@ -1469,6 +1469,8 @@ struct QueryState {
     route_switches: u32,
     /// 本轮连续被 Apple 拒绝的节点数，拿到正常响应后清零。
     consecutive_rejections: u32,
+    /// 本轮测速不通或请求连不通的节点，同轮不再重试，下一轮重新测。
+    dead_routes: HashSet<String>,
     /// 订阅节点所属的订阅名，用于切换前测速。
     route_providers: HashMap<String, String>,
     /// 已经提示过「全部节点冷却」的站点，避免同一次冷却反复弹出告警。
@@ -1492,6 +1494,7 @@ impl QueryState {
         self.route_failure = None;
         self.route_switches = 0;
         self.consecutive_rejections = 0;
+        self.dead_routes.clear();
     }
 
     fn cached_delivery(
@@ -1590,10 +1593,17 @@ impl QueryState {
                 failure.clone()
             } else {
                 let node = self.routes.active().unwrap_or("尚未选定");
+                let mut notes = Vec::new();
                 if self.route_switches > 0 {
-                    format!("Clash 节点 {node}（本轮切换 {} 次）", self.route_switches)
-                } else {
+                    notes.push(format!("本轮切换 {} 次", self.route_switches));
+                }
+                if !self.dead_routes.is_empty() {
+                    notes.push(format!("跳过 {} 个连不通的节点", self.dead_routes.len()));
+                }
+                if notes.is_empty() {
                     format!("Clash 节点 {node}")
+                } else {
+                    format!("Clash 节点 {node}（{}）", notes.join("，"))
                 }
             }),
         }
@@ -1630,6 +1640,7 @@ impl QueryState {
         };
         if pool_settings(&self.network.clash) != pool_settings(&network.clash) {
             self.routes = RoutePool::default();
+            self.dead_routes.clear();
             self.cooling_announced.clear();
         }
         self.clash = uses_clash.then(|| ClashController::new(&network.clash));
@@ -1692,6 +1703,7 @@ impl QueryState {
             eprintln!("手动切换节点后断开旧连接失败：{error}");
         }
         self.routes.clear_route(node);
+        self.dead_routes.remove(node);
         self.routes.set_active(Some(node.to_string()));
         self.consecutive_rejections = 0;
         self.cooling_announced.clear();
@@ -1731,7 +1743,19 @@ impl QueryState {
         // 切换前先测速：测不通的节点直接跳过并短暂标记，不切过去浪费一次 Apple 请求。
         let chosen = loop {
             let now = Instant::now();
-            let Some(candidate) = self.routes.choose(&site, now).map(str::to_string) else {
+            let Some(candidate) = self
+                .routes
+                .choose_except(&site, now, &self.dead_routes)
+                .map(str::to_string)
+            else {
+                if self.routes.choose(&site, now).is_some() {
+                    // 剩下的节点本轮都已测过不通，再测只会原地打转，等下一轮重新测。
+                    return Err(ApiError::Transport(format!(
+                        "策略组「{group}」的 {} 个节点本轮都被 Apple 拒绝或连不通（其中 {} 个连不通），下一轮重试",
+                        self.routes.routes().len(),
+                        self.dead_routes.len()
+                    )));
+                }
                 let remaining = self.routes.wait_for(&site, now).unwrap_or_default();
                 return Err(ApiError::CoolingDown {
                     remaining_seconds: remaining.as_secs()
@@ -1764,6 +1788,7 @@ impl QueryState {
                 Err(error) => {
                     eprintln!("Clash 节点 {candidate} {error}，跳过");
                     self.routes.mark_unreachable(&candidate, Instant::now());
+                    self.dead_routes.insert(candidate);
                 }
             }
         };
@@ -1842,6 +1867,7 @@ impl QueryState {
         };
         self.routes.mark_unreachable(&active, Instant::now());
         eprintln!("Clash 节点 {active} 连不通，暂时跳过");
+        self.dead_routes.insert(active);
         self.can_switch_route(region)
     }
 
@@ -1851,7 +1877,7 @@ impl QueryState {
             && self.consecutive_rejections < MAX_CONSECUTIVE_REJECTIONS
             && self
                 .routes
-                .choose(&region_site(region), Instant::now())
+                .choose_except(&region_site(region), Instant::now(), &self.dead_routes)
                 .is_some()
     }
 
@@ -1929,6 +1955,7 @@ impl QueryState {
 
     fn retry_now(&mut self) {
         self.routes.release_waits(Instant::now());
+        self.dead_routes.clear();
         self.route_failure = None;
         self.cooling_announced.clear();
         self.session_start_failure = None;
@@ -4960,6 +4987,57 @@ pub(crate) mod tests {
             !state
                 .routes
                 .is_available("日本01", "www.apple.com.cn", Instant::now())
+        );
+    }
+
+    #[tokio::test]
+    async fn 本轮测不通的节点到期后也不重测() {
+        let (clash, log) = fake_clash_with_dead(
+            &["香港01", "日本01", "新加坡01"],
+            "香港01",
+            &["日本01", "新加坡01"],
+        )
+        .await;
+        let (fetcher, _peer) = cdp_responses(vec![http_response(541)]).await;
+        use_clash(&fetcher, clash).await;
+        let region = region_by_locale("zh_CN").unwrap();
+
+        fetcher.begin_cycle().await;
+        assert!(
+            fetcher
+                .pickup_message(region, "R390", &[test_target("MG6X4CH/A")], None)
+                .await
+                .is_err()
+        );
+        {
+            let mut state = fetcher.state.lock().await;
+            assert_eq!(state.dead_routes.len(), 2);
+            // 模拟逐个测速耗时超过短暂跳过时间：标记到期，节点重新变成可用。
+            state.routes.clear_route("日本01");
+            state.routes.clear_route("新加坡01");
+        }
+        let error = fetcher
+            .pickup_message(region, "R705", &[test_target("MG6X4CH/A")], None)
+            .await
+            .expect_err("同轮不应再切到测不通的节点");
+        assert!(
+            error.to_string().contains("本轮都被 Apple 拒绝或连不通"),
+            "{error}"
+        );
+        let log = log.lock().await.clone();
+        assert!(
+            !log.iter().any(|entry| entry.starts_with("PUT")),
+            "不能切到测速不通的节点：{log:?}"
+        );
+        assert_eq!(
+            fetcher.cycle_stats().await.route.as_deref(),
+            Some("Clash 节点 香港01（跳过 2 个连不通的节点）")
+        );
+
+        fetcher.begin_cycle().await;
+        assert!(
+            fetcher.state.lock().await.dead_routes.is_empty(),
+            "下一轮应重新测速"
         );
     }
 

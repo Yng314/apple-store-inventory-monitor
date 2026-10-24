@@ -17,6 +17,11 @@ const CONTROLLER_TIMEOUT: Duration = Duration::from_secs(4);
 pub const DELAY_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 /// 单个节点的测速超时。
 pub const DELAY_TIMEOUT_MS: u32 = 3000;
+/// 整组测速的超时，与 Clash Verge 的默认值一致。
+///
+/// mihomo 的整组测速是一批批并发测完全部节点，超时管的是整组而不是单个节点。
+/// 节点一多，3 秒内排在后面的节点还没测完就被算作超时。
+pub const GROUP_DELAY_TIMEOUT_MS: u32 = 10_000;
 
 /// 策略组里不能当作出口的条目类型：嵌套策略组、拒绝和兼容占位。
 const NON_ROUTE_TYPES: &[&str] = &[
@@ -233,14 +238,14 @@ impl ClashController {
         .map(|_| ())
     }
 
-    fn delay_request(&self, segments: &[&str]) -> reqwest::RequestBuilder {
+    fn delay_request(&self, segments: &[&str], timeout_ms: u32) -> reqwest::RequestBuilder {
         self.request(reqwest::Method::GET, segments)
             .query(&[
                 ("url", DELAY_TEST_URL.to_string()),
-                ("timeout", DELAY_TIMEOUT_MS.to_string()),
+                ("timeout", timeout_ms.to_string()),
             ])
             // 控制接口要等测速结束才返回，客户端超时要比测速超时更长。
-            .timeout(Duration::from_millis(u64::from(DELAY_TIMEOUT_MS) + 5000))
+            .timeout(Duration::from_millis(u64::from(timeout_ms) + 5000))
     }
 
     /// 测单个节点的延迟（毫秒）。超时或连不通时返回错误。
@@ -252,10 +257,11 @@ impl ClashController {
             delay: u32,
         }
         let request = match provider {
-            Some(provider) => {
-                self.delay_request(&["providers", "proxies", provider, node, "healthcheck"])
-            }
-            None => self.delay_request(&["proxies", node, "delay"]),
+            Some(provider) => self.delay_request(
+                &["providers", "proxies", provider, node, "healthcheck"],
+                DELAY_TIMEOUT_MS,
+            ),
+            None => self.delay_request(&["proxies", node, "delay"], DELAY_TIMEOUT_MS),
         };
         let response = request
             .send()
@@ -276,7 +282,7 @@ impl ClashController {
     /// 一次测完策略组内全部节点，返回测通节点的延迟。超时节点不在结果中。
     pub async fn group_delays(&self, group: &str) -> Result<HashMap<String, u32>, String> {
         let response = self
-            .send(self.delay_request(&["group", group, "delay"]))
+            .send(self.delay_request(&["group", group, "delay"], GROUP_DELAY_TIMEOUT_MS))
             .await?;
         let delays = response
             .json::<HashMap<String, u32>>()

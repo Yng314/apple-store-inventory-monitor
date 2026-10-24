@@ -83,8 +83,8 @@ impl<'de> Deserialize<'de> for OpenOnHit {
 /// 出现的背景。30 秒足够应付抢购，同时不会把自己送进黑名单。
 pub const DEFAULT_INTERVAL_SECONDS: u64 = 30;
 
-/// 允许设置的间隔下限（秒）。保留手动调快的余地，但不允许低到必然触发风控。
-pub const MIN_INTERVAL_SECONDS: u64 = 5;
+/// 允许设置的间隔下限（秒）。频率交给用户决定，只排除 0 秒的无间隔连发。
+pub const MIN_INTERVAL_SECONDS: u64 = 1;
 
 /// 读取设置文件时接受的字节上限。
 ///
@@ -483,8 +483,8 @@ impl Settings {
             .as_ref()
             .and_then(DeliveryRegion::normalized);
 
-        // 注意是「小于下限就回到默认值」，不是「夹到下限」。手抖填了 1 秒的人
-        // 想要的是快，但 5 秒同样会被风控盯上；退回 30 秒才是安全的那一侧。
+        // 注意是「小于下限就回到默认值」，不是「夹到下限」。0 秒多半是没填或填错，
+        // 退回 30 秒才是安全的那一侧。
         if self.interval_seconds < MIN_INTERVAL_SECONDS {
             self.interval_seconds = DEFAULT_INTERVAL_SECONDS;
         }
@@ -1065,17 +1065,15 @@ mod tests {
 
     #[test]
     fn 规范化把过小的间隔退回默认值() {
-        for bad in [0, 1, MIN_INTERVAL_SECONDS - 1] {
-            let mut s = Settings {
-                interval_seconds: bad,
-                ..Settings::default()
-            };
-            s.normalize();
-            assert_eq!(
-                s.interval_seconds, DEFAULT_INTERVAL_SECONDS,
-                "间隔 {bad} 秒应当退回默认值"
-            );
-        }
+        let mut s = Settings {
+            interval_seconds: 0,
+            ..Settings::default()
+        };
+        s.normalize();
+        assert_eq!(
+            s.interval_seconds, DEFAULT_INTERVAL_SECONDS,
+            "间隔 0 秒应当退回默认值"
+        );
 
         // 下限本身是允许的，用户有意调快的余地要留着。
         let mut s = Settings {
