@@ -291,6 +291,8 @@ pub struct CheckoutSettings {
     /// 按本次到货的型号自动加购；开启后，所有中国大陆监控型号均可触发。
     /// 旧配置保持关闭，继续使用预先准备的购物袋和指定商品。
     pub auto_add_to_bag: bool,
+    /// 自动加购时是否同时选 AppleCare+ 服务计划。关闭时选「不加 AppleCare+」。
+    pub add_apple_care: bool,
     /// 取货人证件号码后四位。Apple 每次结账都要求重新填写，不会预填。
     pub national_id_suffix: String,
     pub payment: CheckoutPayment,
@@ -321,6 +323,7 @@ impl Default for CheckoutSettings {
             enabled: false,
             disable_after_success: true,
             auto_add_to_bag: false,
+            add_apple_care: false,
             national_id_suffix: String::new(),
             payment: CheckoutPayment::Alipay,
             installment_bank: "招商银行".into(),

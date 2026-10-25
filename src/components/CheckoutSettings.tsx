@@ -187,6 +187,17 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
             ? "监控列表中的中国大陆型号都可触发，同一时间只处理一件。已有本次型号 1 件时沿用；其他商品或数量不符会结束本轮并清空专属购物袋，下次有货重新加购。请勿在此购物袋保存其他商品，暂不支持需另选表带等组合配置。"
             : "关闭时使用事先准备的购物袋，只对下面选定的商品结账。"}
         </p>
+        {checkout.autoAddToBag ? <>
+          <div className="setting-row">
+            <Label htmlFor="checkout-apple-care" className="text-sm font-normal">加购时同时加 AppleCare+</Label>
+            <Switch id="checkout-apple-care" checked={!!checkout.addAppleCare} onCheckedChange={(addAppleCare) => save({ addAppleCare })} />
+          </div>
+          <p className="text-[11px] leading-4 break-words text-muted-foreground">
+            {checkout.addAppleCare
+              ? "在商品页选「AppleCare+ 服务计划」并确认添加，费用随订单一起支付。商品页没有 AppleCare+ 可选时停下，不会改成不加。"
+              : "在商品页选「不加 AppleCare+ 服务计划」。"}
+          </p>
+        </> : null}
         {!checkout.autoAddToBag ? <div className="field-group">
           <Label htmlFor="checkout-product" className="control-label">要下单的商品</Label>
           {products.length > 1 ? (

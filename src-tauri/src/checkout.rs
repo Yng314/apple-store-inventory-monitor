@@ -100,6 +100,8 @@ impl fmt::Display for CheckoutError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutPlan {
     pub auto_add_to_bag: bool,
+    /// 自动加购时同时加 AppleCare+；只在 `auto_add_to_bag` 开启时生效。
+    pub add_apple_care: bool,
     pub part_number: String,
     pub product_url: Option<String>,
     pub store_number: String,
@@ -168,6 +170,7 @@ impl CheckoutPlan {
         };
         Self {
             auto_add_to_bag: settings.auto_add_to_bag,
+            add_apple_care: settings.add_apple_care,
             part_number: target.part_number.clone(),
             product_url: if target.companion_part.is_none() && target.kit_part.is_none() {
                 target.purchase_url(None)
@@ -230,6 +233,9 @@ struct LineItem {
     part_number: String,
     #[serde(default, rename = "removeId")]
     remove_id: String,
+    /// 这一行下面挂着 AppleCare+ 子项。Apple 把它放在商品行里，不单独成行。
+    #[serde(default, rename = "appleCare")]
+    apple_care: bool,
 }
 
 /// 型号名称只比较去掉空白后的文字，大小写不敏感。
@@ -341,7 +347,7 @@ fn bag_action_js(plan: &CheckoutPlan, source: &str, action: &str, remove_id: &st
     format!(
         "JSON.stringify(({})({},{}))",
         source,
-        json!({"partNumber": plan.part_number, "productName": plan.product_name, "removeId": remove_id}),
+        json!({"partNumber": plan.part_number, "productName": plan.product_name, "removeId": remove_id, "appleCare": plan.add_apple_care}),
         js_string(action),
     )
 }
@@ -902,6 +908,16 @@ impl Flow<'_> {
                 "购物袋的零件号或数量与本次到货型号不一致",
             ));
         }
+        if item.apple_care != self.plan.add_apple_care {
+            return Err(CheckoutError::new(
+                Stage::Bag,
+                if self.plan.add_apple_care {
+                    "购物袋里的商品没有带 AppleCare+"
+                } else {
+                    "购物袋里的商品带了 AppleCare+，与设置不一致"
+                },
+            ));
+        }
         Ok(())
     }
 
@@ -987,11 +1003,7 @@ impl Flow<'_> {
                 if std::env::var_os("APW_DIAG_AUTO_BAG").is_some() {
                     eprintln!("加购按钮诊断：{:?}", self.session.evaluate(r#"JSON.stringify((()=>{const b=document.querySelector('button[data-autom="add-to-cart"]');const f=b?.form;return {url:location.href, ready:document.readyState, button:b?.outerHTML, form:f?{action:f.getAttribute('action'),method:f.method,products:[...f.querySelectorAll('input[name="product"]')].map(e=>e.value)}:null};})())"#, false).await);
                 }
-                for kind in ["mousePressed", "mouseReleased"] {
-                    self.session.command("Input.dispatchMouseEvent", json!({
-                        "type": kind, "x": point.x, "y": point.y, "button": "left", "clickCount": 1,
-                    })).await.map_err(|e| CheckoutError::new(Stage::Bag, e.to_string()))?;
-                }
+                self.mouse_click(Stage::Bag, &point).await?;
                 break;
             }
             if !added.error.is_empty() || Instant::now() >= deadline {
@@ -1013,13 +1025,75 @@ impl Flow<'_> {
         if added == "failed" {
             return Err(CheckoutError::new(Stage::Bag, "Apple 加购页面返回 404"));
         }
-        let lines = self.read_bag(Stage::Bag).await?;
+        let mut lines = self.read_bag(Stage::Bag).await?;
+        if self.plan.add_apple_care && matches!(lines.items.as_slice(), [item] if !item.apple_care)
+        {
+            lines = self.add_bag_apple_care().await?;
+        }
         self.verify_auto_bag(&lines)?;
         self.report(format!(
-            "自动加购：已确认 {} 1 件，购物袋无其他商品",
-            self.plan.product_name
+            "自动加购：已确认 {} 1 件{}，购物袋无其他商品",
+            self.plan.product_name,
+            if self.plan.add_apple_care {
+                "（含 AppleCare+）"
+            } else {
+                ""
+            }
         ));
         Ok(())
+    }
+
+    async fn mouse_click(&mut self, stage: Stage, point: &ClickPoint) -> Result<(), CheckoutError> {
+        for kind in ["mousePressed", "mouseReleased"] {
+            self.session
+                .command(
+                    "Input.dispatchMouseEvent",
+                    json!({
+                        "type": kind, "x": point.x, "y": point.y, "button": "left", "clickCount": 1,
+                    }),
+                )
+                .await
+                .map_err(|e| CheckoutError::new(stage, e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// 商品页选了 AppleCare+，加购后购物袋里有时仍只有商品本身，Apple 在商品行下面
+    /// 另给一个「添加」。只点一次，等 AppleCare+ 子项出现；超时就停下，不重复点击。
+    async fn add_bag_apple_care(&mut self) -> Result<Lines, CheckoutError> {
+        const ADD_JS: &str = r#"JSON.stringify((() => {
+  const row = [...document.querySelectorAll('[data-autom^="bag-item-"]')].find((e) => /^bag-item-\d+$/.test(e.getAttribute('data-autom')));
+  const button = row && [...row.querySelectorAll('button[data-autom="bag-inlineattach-add"]')]
+    .find((e) => /AppleCare/i.test(e.getAttribute('aria-label') || ''));
+  if (!button || button.disabled) return null;
+  button.scrollIntoView({ block: 'center' });
+  const rect = button.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0 ? { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } : null;
+})())"#;
+        self.report("自动加购：购物袋里还没有 AppleCare+，点购物袋里的「添加」");
+        let point = self
+            .wait(
+                Stage::Bag,
+                ADD_JS,
+                ELEMENT_TIMEOUT,
+                "购物袋里 AppleCare+ 的「添加」按钮",
+                |point: &Option<ClickPoint>| point.is_some(),
+            )
+            .await?
+            .ok_or_else(|| {
+                CheckoutError::new(Stage::Bag, "购物袋里找不到 AppleCare+ 的「添加」")
+            })?;
+        self.mouse_click(Stage::Bag, &point).await?;
+        self.wait(
+            Stage::Bag,
+            LINE_ITEMS_JS,
+            NAVIGATION_TIMEOUT,
+            "AppleCare+ 加入购物袋",
+            |lines: &Lines| {
+                lines.bag_ready && matches!(lines.items.as_slice(), [item] if item.apple_care)
+            },
+        )
+        .await
     }
 
     async fn cleanup_bag(&mut self) -> Result<(), CheckoutError> {
@@ -1917,6 +1991,7 @@ mod tests {
     fn test_plan(place_order: bool) -> CheckoutPlan {
         CheckoutPlan {
             auto_add_to_bag: false,
+            add_apple_care: false,
             part_number: "MK2Q4CH/A".into(),
             product_url: Some("https://www.apple.com.cn/shop/product/MK2Q4CH/A".into()),
             store_number: "R678".into(),
@@ -2087,6 +2162,7 @@ mod tests {
             };
             let plan = CheckoutPlan {
                 auto_add_to_bag: false,
+                add_apple_care: false,
                 part_number: "MK2Q4CH/A".into(),
                 product_url: Some("https://www.apple.com.cn/shop/product/MK2Q4CH/A".into()),
                 store_number: "R678".into(),
@@ -2656,7 +2732,42 @@ mod tests {
             quantity: quantity.into(),
             part_number: String::new(),
             remove_id: String::new(),
+            apple_care: false,
         }
+    }
+
+    #[tokio::test]
+    async fn 自动加购核对购物袋里的保障服务与设置一致() {
+        let (mut session, peer, _) =
+            crate::chromium_fetcher::tests::checkout_session(Vec::new()).await;
+        for (wanted, in_bag) in [(false, false), (true, true), (false, true), (true, false)] {
+            let mut plan = test_plan(false);
+            plan.auto_add_to_bag = true;
+            plan.add_apple_care = wanted;
+            let mut line = item(&plan.product_name, "1");
+            line.part_number = plan.part_number.clone();
+            line.apple_care = in_bag;
+            let lines = Lines {
+                items: vec![line],
+                total: String::new(),
+                can_checkout: true,
+                can_place_order: false,
+                bag_ready: true,
+                bag_empty: false,
+                errors: Vec::new(),
+            };
+            let flow = Flow {
+                session: &mut session,
+                plan: &plan,
+                progress: &|_| {},
+                store_number: plan.store_number.clone(),
+                store_title: plan.store_title.clone(),
+                owns_bag: false,
+            };
+            assert_eq!(flow.verify_auto_bag(&lines).is_ok(), wanted == in_bag);
+        }
+        drop(session);
+        let _ = peer.await;
     }
 
     #[test]
@@ -2711,6 +2822,7 @@ mod tests {
         assert!(script.contains(r#"e.value === "R1\"); alert(1); (\"""#));
         let script = billing_choice_js(&CheckoutPlan {
             auto_add_to_bag: false,
+            add_apple_care: false,
             part_number: "MK2Q4CH/A".into(),
             product_url: Some("https://www.apple.com.cn/shop/product/MK2Q4CH/A".into()),
             store_number: "R678".into(),
@@ -2741,6 +2853,7 @@ mod tests {
             |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
         let plan = CheckoutPlan {
             auto_add_to_bag: false,
+            add_apple_care: false,
             part_number: "MK2Q4CH/A".into(),
             product_url: Some("https://www.apple.com.cn/shop/product/MK2Q4CH/A".into()),
             store_number: env("APW_LIVE_STORE", "R678"),
@@ -2812,6 +2925,7 @@ mod tests {
         let progress = |_: String| {};
         let plan = CheckoutPlan {
             auto_add_to_bag: false,
+            add_apple_care: false,
             part_number: "MK2Q4CH/A".into(),
             product_url: Some("https://www.apple.com.cn/shop/product/MK2Q4CH/A".into()),
             store_number: "R678".into(),

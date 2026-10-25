@@ -54,13 +54,72 @@ test("相同名称但 SKU、域名或页面实际型号不符时不能加购", (
   }
 });
 
-function bagFixture({ count = 1, part = expected.partNumber, quantity = "1", id = expected.removeId, name = expected.productName, empty = false } = {}) {
+test("开启 AppleCare+ 时选 AppleCare+ 并点浮层里的「添加」，不选不加 AppleCare+", () => {
+  const noTrade = { checked: false, disabled: false, click() { this.checked = true; } };
+  const noCare = { checked: false, disabled: false, click() { this.checked = true; } };
+  const confirm = { disabled: false, width: 0, click() { acp.checked = true; this.width = 0; }, getBoundingClientRect() { return { width: this.width }; } };
+  const acp = { checked: false, disabled: false, clicks: 0, click() { this.clicks++; confirm.width = 80; } };
+  const acpart = { name: "acpart", value: "none" };
+  const button = { disabled: false, form: { elements: [acpart] }, scrollIntoView() {}, getBoundingClientRect: () => ({x:10,y:20,width:100,height:40}) };
+  const document = { querySelector(selector) {
+    return ({
+      '[data-autom="summary-productName"]': { innerText: expected.productName },
+      'button[data-autom="add-to-cart"]': button,
+      'input[data-autom="choose-noTradeIn"]': noTrade,
+      'input[data-autom="noapplecare"]': noCare,
+      'input[data-autom="acp"]': acp,
+      'button[data-autom="inlineapplecare_overlay_add"]': confirm,
+    })[selector] ?? null;
+  } };
+  const page = { document, location, URLSearchParams, Date };
+  const step = (action) => JSON.parse(vm.runInContext(`JSON.stringify((${addSource})(${JSON.stringify({ ...expected, appleCare: true })}, ${JSON.stringify(action)}))`, page));
+  page.window = page;
+  vm.createContext(page);
+  assert.equal(step("add").ready, false, "AppleCare+ 未选中前不能加购");
+  assert.equal(step("prepare").ready, false);
+  assert.equal(noTrade.checked, true);
+  assert.equal(step("prepare").ready, false);
+  assert.equal(acp.clicks, 1);
+  assert.equal(acp.checked, false, "浮层未确认前单选框还没选中");
+  assert.equal(step("prepare").ready, false);
+  assert.equal(acp.checked, true);
+  assert.equal(step("prepare").ready, false, "表单里的 acpart 还没更新时不能加购");
+  assert.equal(step("add").point, undefined);
+  acpart.value = "SHK93CH/A";
+  assert.equal(step("prepare").ready, true);
+  assert.equal(acp.clicks, 1);
+  assert.equal(noCare.checked, false);
+  assert.deepEqual(step("add").point, {x:60,y:40});
+});
+
+test("开启 AppleCare+ 但商品页只有不加 AppleCare+ 时停下", () => {
+  const document = { querySelector(selector) {
+    return ({
+      '[data-autom="summary-productName"]': { innerText: expected.productName },
+      'button[data-autom="add-to-cart"]': { disabled: false },
+      'input[data-autom="noapplecare"]': { checked: false, disabled: false, click() {} },
+    })[selector] ?? null;
+  } };
+  assert.match(run(addSource, document, location, { ...expected, appleCare: true }).error, /AppleCare/);
+});
+
+test("购物袋商品行带 AppleCare+ 子项时标出来", () => {
+  const page = { ...location, pathname: "/shop/bag" };
+  assert.equal(run(linesSource, bagFixture().document, page, []).items[0].appleCare, false);
+  const withCare = bagFixture({ careName: "AppleCare+ 服务计划 (适用于 iPhone 16)" });
+  assert.equal(run(linesSource, withCare.document, page, []).items[0].appleCare, true);
+});
+
+function bagFixture({ count = 1, part = expected.partNumber, quantity = "1", id = expected.removeId, name = expected.productName, empty = false, careName = "" } = {}) {
   let removals = 0;
   const title = { innerText: name, getAttribute: () => `/shop/product/${part.toLowerCase()}` };
   const remove = { id, disabled: false, click() { removals++; } };
   const row = {
     innerText: `${name} 数量 ${quantity}`,
     getAttribute: () => "bag-item-1",
+    querySelectorAll: (selector) => selector === 'button[data-autom^="bag-item-remove-button-"]' && careName
+      ? [{ getAttribute: () => `bag-item-remove-button-${careName}` }]
+      : [],
     querySelector(selector) {
       if (selector === '[data-autom="bag-item-name"], h2, h3' || selector === 'a[data-autom="bag-item-name"]') return title;
       if (selector === 'select[data-autom="item-quantity-dropdown"]') return { value: quantity };
@@ -109,6 +168,7 @@ function multiBag(items) {
     const row = {
       innerText: `${item.name}${item.quantity ? ' 数量 ' + item.quantity : ''}`,
       getAttribute: () => `bag-item-${rows.indexOf(row) + 1}`,
+      querySelectorAll: () => [],
       querySelector(selector) {
         if (selector === '[data-autom="bag-item-name"], h2, h3' || selector === 'a[data-autom="bag-item-name"]') return title;
         if (selector === 'select[data-autom="item-quantity-dropdown"]') return item.quantity ? { value: item.quantity } : null;
