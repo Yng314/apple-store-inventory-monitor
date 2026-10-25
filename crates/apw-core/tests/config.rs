@@ -123,6 +123,7 @@ fn 样例设置() -> Settings {
             enabled: true,
             disable_after_success: false,
             auto_add_to_bag: false,
+            add_apple_care: false,
             national_id_suffix: "123X".into(),
             payment: CheckoutPayment::Installment,
             installment_bank: "招商银行".into(),

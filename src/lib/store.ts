@@ -112,6 +112,7 @@ const DEFAULT_SETTINGS: Settings = {
     enabled: false,
     disableAfterSuccess: true,
     autoAddToBag: false,
+    addAppleCare: false,
     nationalIdSuffix: "",
     payment: "alipay",
     installmentBank: "招商银行",

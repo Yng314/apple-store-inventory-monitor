@@ -170,6 +170,8 @@ export interface CheckoutSettings {
   disableAfterSuccess: boolean;
   /** 自动加入本次到货的型号，允许监控列表中的不同商品触发。 */
   autoAddToBag: boolean;
+  /** 自动加购时同时加 AppleCare+ 服务计划；关闭时选「不加 AppleCare+」。 */
+  addAppleCare: boolean;
   /** 取货人证件号码后四位；Apple 每次结账都要求重新填写。 */
   nationalIdSuffix: string;
   payment: CheckoutPayment;
