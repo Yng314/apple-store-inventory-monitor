@@ -244,15 +244,12 @@ jobs:
           # 四个作业传的是同一段文字，后跑完的作业会用它覆盖 Release 说明，
           # 内容一致所以结果是幂等的。改这里记得别引入 ${{ }}，会被当成表达式求值。
           releaseBody: |
-            ### v1.0.24 更新内容
+            ### v1.0.25 更新内容
 
-            - 查询间隔最短可设为 1 秒；间隔越短越容易触发 Apple 风控，日常仍建议 30 秒或更长。
-            - Clash 整组测速超时改为 10 秒，节点多时后面的节点不再被误判为超时。
-            - 本轮测不通的节点同轮不再重测，节点多时也能走到后面的可用节点。
-            - 修复 macOS 上关闭窗口收进托盘后，点 Dock 图标无法唤出主界面的问题。
-            - 顶栏在宽屏下保持中间一栏居中。
+            - 自动加购新增「加购时同时加 AppleCare+」选项，默认关闭；开启后加购时选 AppleCare+ 服务计划，iPhone Duo 等加入购物袋后未带上时会在购物袋里补点一次「添加」。
+            - 自动加购核对购物袋时同时核对 AppleCare+ 是否与设置一致，不一致时结束本轮并按原有规则清理。
 
-            完整逐项记录见 [CHANGELOG.md](https://github.com/suversal/apple-store-inventory-monitor/blob/v1.0.24/CHANGELOG.md)。
+            完整逐项记录见 [CHANGELOG.md](https://github.com/suversal/apple-store-inventory-monitor/blob/v1.0.25/CHANGELOG.md)。
 
             ### 下载哪一个
 
