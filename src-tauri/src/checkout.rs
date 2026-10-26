@@ -432,14 +432,17 @@ struct ContactState {
     ready: bool,
     missing: Vec<String>,
     needs_id: bool,
+    failed: Vec<String>,
 }
 
-const CONTACT_STATE_JS: &str = r#"(() => {
-  const field = (name) => document.querySelector('input[data-autom="form-field-' + name + '"]');
-  const labels = { lastName: '姓氏', firstName: '名字', emailAddress: '电子邮件地址', fullDaytimePhone: '手机号码' };
-  const missing = Object.keys(labels).filter((name) => { const e = field(name); return !e || !e.value.trim(); }).map((name) => labels[name]);
-  return JSON.stringify({ ready: !!field('lastName'), missing, needsId: !!field('nationalIdSelf') });
-})()"#;
+/// 填入 `values` 里页面上有的栏目，再读回取货联系人表单的状态。
+fn contact_js(values: &serde_json::Value) -> String {
+    format!(
+        "JSON.stringify(({})({}))",
+        include_str!("checkout_contact.js"),
+        values
+    )
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1559,7 +1562,7 @@ impl Flow<'_> {
         let state: ContactState = self
             .wait(
                 stage,
-                CONTACT_STATE_JS,
+                &contact_js(&json!({})),
                 ELEMENT_TIMEOUT,
                 "取货信息表单",
                 |s: &ContactState| s.ready,
@@ -1575,37 +1578,17 @@ impl Flow<'_> {
                 .iter()
                 .map(|(field, value)| ((*field).to_owned(), json!(value)))
                 .collect();
-            let fill = format!(
-                r#"(() => {{
-  const values = {values};
-  const failed = [];
-  for (const [name, value] of Object.entries(values)) {{
-    const input = document.querySelector('input[data-autom="form-field-' + name + '"]');
-    if (!input) {{ failed.push(name); continue; }}
-    input.focus();
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
-    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-    input.blur();
-    if (input.value !== value) failed.push(name);
-  }}
-  return JSON.stringify(failed);
-}})()"#,
-                values = serde_json::Value::Object(fields)
-            );
-            let failed: Vec<String> = self
-                .read(&fill)
+            let state: ContactState = self
+                .read(&contact_js(&serde_json::Value::Object(fields)))
                 .await
                 .map_err(|e| CheckoutError::new(stage, e))?;
-            if !failed.is_empty() {
+            if !state.failed.is_empty() {
                 return Err(CheckoutError::new(
                     stage,
-                    format!("联系信息没有填进去：{}", failed.join("、")),
+                    format!("联系信息没有填进去：{}", state.failed.join("、")),
                 ));
             }
-            self.read(CONTACT_STATE_JS)
-                .await
-                .map_err(|e| CheckoutError::new(stage, e))?
+            state
         };
         // 下单后取货信息无法更改，缺了任何一项都停下，不带着空项往下走。
         if !state.missing.is_empty() {
