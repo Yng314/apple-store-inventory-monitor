@@ -244,12 +244,11 @@ jobs:
           # 四个作业传的是同一段文字，后跑完的作业会用它覆盖 Release 说明，
           # 内容一致所以结果是幂等的。改这里记得别引入 ${{ }}，会被当成表达式求值。
           releaseBody: |
-            ### v1.0.25 更新内容
+            ### v1.0.26 更新内容
 
-            - 自动加购新增「加购时同时加 AppleCare+」选项，默认关闭；开启后加购时选 AppleCare+ 服务计划，iPhone Duo 等加入购物袋后未带上时会在购物袋里补点一次「添加」。
-            - 自动加购核对购物袋时同时核对 AppleCare+ 是否与设置一致，不一致时结束本轮并按原有规则清理。
+            - 修复登录状态下结账时，取货信息表单没有邮箱栏导致自动结账报「取货联系人缺少电子邮件地址」而停下的问题；现在只核对和填写页面上实际出现的栏目。
 
-            完整逐项记录见 [CHANGELOG.md](https://github.com/suversal/apple-store-inventory-monitor/blob/v1.0.25/CHANGELOG.md)。
+            完整逐项记录见 [CHANGELOG.md](https://github.com/suversal/apple-store-inventory-monitor/blob/v1.0.26/CHANGELOG.md)。
 
             ### 下载哪一个
 
