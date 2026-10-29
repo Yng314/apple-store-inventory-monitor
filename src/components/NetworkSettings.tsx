@@ -13,11 +13,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { listClashNodes, saveSettings, selectClashNode, testClashRoute } from "@/lib/store";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { getJuliangStatus, testJuliangRoute, listClashNodes, saveSettings, selectClashNode, testClashRoute } from "@/lib/store";
 import type {
   ClashRouteCheck,
   ClashSettings,
+  JuliangStatus,
   NetworkMode,
   NetworkSettings as Network,
   RouteList,
@@ -27,13 +29,80 @@ const MODE_HINTS: Record<NetworkMode, string> = {
   system: "跟随系统代理。开着 Clash 系统代理或 TUN 时，出口由 Clash 规则决定。",
   pinned: "经 Clash 专用端口固定使用下方指定的节点，不自动切换；选 DIRECT 即用本机网络，开着 TUN 也有效。",
   clash: "只走专用端口；节点被 Apple 拒绝时冷却并换下一个，不影响电脑本身的节点。",
+  juliang: "按需提取一个短效代理，临近到期或失效后更换；只用于查询，自动结账沿用原有网络。",
 };
 
 const MODE_LABELS: Record<NetworkMode, string> = {
   system: "跟随系统代理",
   pinned: "指定节点",
   clash: "Clash 节点轮换",
+  juliang: "巨量动态 IP",
 };
+
+function JuliangSettings({ network, running }: { network: Network; running: boolean }) {
+  const [url, setUrl] = useState(network.juliang.apiUrl);
+  const [status, setStatus] = useState<JuliangStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checked, setChecked] = useState(false);
+  useEffect(() => setUrl(network.juliang.apiUrl), [network.juliang.apiUrl]);
+  useEffect(() => {
+    let active = true;
+    let pending = false;
+    const refresh = () => {
+      if (pending) {
+        setStatus((value) => value ? { ...value, remainingSeconds: Math.max(0, value.remainingSeconds - 1), retryAfterSeconds: Math.max(0, value.retryAfterSeconds - 1) } : value);
+        return;
+      }
+      pending = true;
+      void getJuliangStatus().then((value) => { if (active) setStatus(value); }).catch(() => {
+        if (active) setError("暂时无法读取代理状态");
+      }).finally(() => { pending = false; });
+    };
+    refresh();
+    const timer = setInterval(refresh, 1000);
+    return () => { active = false; clearInterval(timer); };
+  }, []);
+  const save = async () => {
+    const apiUrl = url.trim();
+    if (apiUrl === network.juliang.apiUrl) return true;
+    return saveSettings({ network: { ...network, juliang: { apiUrl } } });
+  };
+  return (
+    <FieldGroup className="mt-3">
+      <Field>
+        <FieldLabel htmlFor="juliang-api-url">提取链接</FieldLabel>
+        <Input id="juliang-api-url" type="password" autoComplete="off" spellCheck={false}
+          value={url} placeholder="粘贴巨量 IP 的 JSON 提取链接"
+          onChange={(event) => { setUrl(event.target.value); setError(null); setChecked(false); }}
+          onBlur={() => { void save(); }} />
+        <FieldDescription>每次提取 1 个 HTTP 代理，并返回剩余有效期。链接含签名，仅保存在本机设置中；HTTP 提取请求为明文传输。</FieldDescription>
+      </Field>
+      <Button type="button" variant="outline" disabled={checking || !url.trim() || running}
+        onClick={async () => {
+          setChecking(true); setError(null); setChecked(false);
+          try {
+            if (!(await save())) { setError("提取链接保存失败"); return; }
+            const result = await testJuliangRoute();
+            if (typeof result === "string") setError(result);
+            else { setStatus(result); setChecked(true); }
+          } finally { setChecking(false); }
+        }}>
+        {checking ? <LoaderCircle data-icon="inline-start" className="animate-spin" aria-hidden="true" /> : <PlugZap data-icon="inline-start" aria-hidden="true" />}
+        {checking ? "正在检查" : "提取并检查代理"}
+      </Button>
+      <FieldDescription>{running ? "监控中自动维护代理，无需手动提取。" : "检查会消耗 1 个 IP；已有有效代理时复用，仅检查代理端口，不触发下单。"}</FieldDescription>
+      <div role="status" aria-live="polite" className="text-xs text-muted-foreground">
+        <p>当前代理：{status?.address ?? "尚未提取"}</p>
+        {status?.address ? <p>剩余有效期：{status.remainingSeconds} 秒</p> : null}
+        {status && status.retryAfterSeconds > 0 ? <p>等待 {status.retryAfterSeconds} 秒后可重试</p> : null}
+        {checked && !error && !status?.error && (status?.remainingSeconds ?? 0) > 0 ? <p>代理端口可连接，Apple 查询结果以监控日志为准。</p> : null}
+        {!running && status?.address ? <p>监控已暂停，代理到期后不会自动提取。</p> : null}
+      </div>
+      {error || status?.error ? <p role="alert" className="text-xs text-destructive">{error ?? status?.error}</p> : null}
+    </FieldGroup>
+  );
+}
 
 /** Clash Verge「全局扩展脚本」模板，与 README 中的脚本保持一致。 */
 const SCRIPT_TEMPLATE = "// Clash Verge「全局扩展脚本」：节点只供果到雷达的专用端口使用，不影响电脑本身的节点\nconst APW_PREFIX = \"APW·\";\nconst APW_GROUP = __GROUP__;\nconst APW_SUBSCRIPTIONS = {\n  机场1: \"机场订阅地址\",\n};\n\nfunction main(config, profileName) {\n  const providers = config[\"proxy-providers\"] || {};\n  const used = [];\n  for (const [label, url] of Object.entries(APW_SUBSCRIPTIONS)) {\n    if (!/^https?:\\/\\//.test(url)) continue;\n    const key = `apw-${label}`;\n    providers[key] = {\n      type: \"http\",\n      url,\n      interval: 86400,\n      path: `./providers/${key}.yaml`,\n      override: { \"additional-prefix\": `${APW_PREFIX}${label}|` },\n      \"health-check\": { enable: false },\n    };\n    used.push(key);\n  }\n  config[\"proxy-providers\"] = providers;\n\n  // 原有策略组若自动收录全部节点（include-all / include-all-providers），排除专用节点\n  const guard = `^${APW_PREFIX}`;\n  const groups = (config[\"proxy-groups\"] || []).filter((g) => g.name !== APW_GROUP);\n  for (const group of groups) {\n    if (group[\"include-all\"] || group[\"include-all-providers\"]) {\n      const old = group[\"exclude-filter\"];\n      if (old && old.includes(guard)) continue;\n      group[\"exclude-filter\"] = old ? `(?:${old})|${guard}` : guard;\n    }\n  }\n  groups.push({ name: APW_GROUP, type: \"select\", proxies: [\"DIRECT\"], use: used });\n  config[\"proxy-groups\"] = groups;\n\n  const listeners = (config.listeners || []).filter((l) => l.name !== \"apple-store-monitor\");\n  listeners.push({ name: \"apple-store-monitor\", type: \"mixed\", port: __PORT__, listen: \"127.0.0.1\", proxy: APW_GROUP });\n  config.listeners = listeners;\n  return config;\n}";
@@ -409,9 +478,11 @@ export function NetworkSettings({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
+            <SelectGroup>
             {(Object.keys(MODE_LABELS) as NetworkMode[]).map((mode) => (
               <SelectItem key={mode} value={mode}>{MODE_LABELS[mode]}</SelectItem>
             ))}
+            </SelectGroup>
           </SelectContent>
         </Select>
         <p className="text-[11px] leading-4 break-words text-muted-foreground">
@@ -420,7 +491,8 @@ export function NetworkSettings({
         </p>
       </div>
 
-      {network.mode !== "system" ? (
+      {network.mode === "juliang" ? <JuliangSettings network={network} running={running} /> : null}
+      {network.mode === "pinned" || network.mode === "clash" ? (
         <div className="mt-3 grid min-w-0 gap-3">
           <div className="flex items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
             <p className="text-[11px] leading-4 text-muted-foreground">

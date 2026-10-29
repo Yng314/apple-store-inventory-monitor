@@ -28,6 +28,7 @@ mod checkout;
 mod checkout_login;
 mod chromium_fetcher;
 mod clash;
+mod juliang;
 mod route_pool;
 #[cfg(windows)]
 mod windows_chromium;
@@ -561,14 +562,24 @@ struct CatalogRefresh {
 ///
 /// 「指定节点」和「Clash 节点轮换」下经 Clash 专用端口，出口就是专用策略组
 /// 当前选中的节点；跟随系统代理时沿用宿主长期持有的客户端。
-fn catalog_http(state: &AppState) -> reqwest::Client {
+async fn catalog_http(state: &AppState) -> Result<reqwest::Client, String> {
     let network = state.settings_snapshot().network;
     if network.mode == apw_core::config::NetworkMode::System {
-        return state.http.clone();
+        return Ok(state.http.clone());
     }
-    reqwest::Proxy::all(format!("http://127.0.0.1:{}", network.clash.proxy_port))
-        .and_then(|proxy| reqwest::Client::builder().proxy(proxy).build())
-        .unwrap_or_else(|_| state.http.clone())
+    if network.mode == apw_core::config::NetworkMode::Juliang {
+        let proxy = reqwest::Proxy::all(state.fetcher.juliang_proxy().await?)
+            .map_err(|_| "巨量 IP 代理地址无效".to_string())?;
+        return reqwest::Client::builder()
+            .proxy(proxy)
+            .build()
+            .map_err(|_| "无法创建巨量 IP 查询客户端".to_string());
+    }
+    Ok(
+        reqwest::Proxy::all(format!("http://127.0.0.1:{}", network.clash.proxy_port))
+            .and_then(|proxy| reqwest::Client::builder().proxy(proxy).build())
+            .unwrap_or_else(|_| state.http.clone()),
+    )
 }
 
 /// 探测客户端能否连上某个站点。拿到任何 HTTP 响应都算连通，状态码不重要。
@@ -602,10 +613,13 @@ async fn refresh_catalog(
     category: Option<Category>,
 ) -> Result<CatalogRefresh, String> {
     let region = region_by_locale(locale).ok_or_else(|| format!("认不出地区 {locale}"))?;
-    let http = catalog_http(state);
+    let http = catalog_http(state).await?;
     // 查询线路的当前节点可能根本连不上某个站点（例如家宽直连访问 www.apple.com
     // 被断开）。经线路完全失败时改用系统网络再试一次，刷新目录不该被节点拖累。
-    let via_route = state.settings_snapshot().network.mode != apw_core::config::NetworkMode::System;
+    let via_route = matches!(
+        state.settings_snapshot().network.mode,
+        apw_core::config::NetworkMode::Pinned | apw_core::config::NetworkMode::Clash
+    );
     let mut errors = Vec::new();
 
     let mut stores_result = state.catalog.refresh_stores(region, &http).await;
@@ -712,8 +726,38 @@ async fn save_settings(
         .set_delivery_region(next.delivery_region.clone())
         .await;
     state.fetcher.set_network(next.network.clone()).await;
+    state.fetcher.set_retry_delay(next.interval()).await;
 
     Ok(next)
+}
+
+#[tauri::command]
+async fn juliang_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<juliang::JuliangStatus, String> {
+    Ok(state.fetcher.juliang_status().await)
+}
+
+#[tauri::command]
+async fn test_juliang_route(
+    state: tauri::State<'_, AppState>,
+) -> Result<juliang::JuliangStatus, String> {
+    if state.settings_snapshot().network.mode != apw_core::config::NetworkMode::Juliang {
+        return Err("请先选择巨量动态 IP 并保存提取链接".into());
+    }
+    let proxy = state.fetcher.juliang_proxy().await?;
+    let address = reqwest::Url::parse(&proxy).map_err(|_| "代理地址无效")?;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect((
+            address.host_str().ok_or("代理地址无效")?,
+            address.port().ok_or("代理端口无效")?,
+        )),
+    )
+    .await
+    .map_err(|_| "巨量 IP 代理端口连接超时")?
+    .map_err(|_| "巨量 IP 代理端口无法连接")?;
+    Ok(state.fetcher.juliang_status().await)
 }
 
 /// Clash 线路测试结果。只访问本机控制接口和端口，不向 Apple 发请求。
@@ -734,6 +778,7 @@ async fn test_clash_route(clash: ClashSettings) -> Result<ClashRouteCheck, Strin
     let mut network = apw_core::config::NetworkSettings {
         mode: apw_core::config::NetworkMode::Clash,
         clash,
+        ..apw_core::config::NetworkSettings::default()
     };
     let mut settings = Settings {
         network: network.clone(),
@@ -811,6 +856,10 @@ async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result
     next.interval_seconds = secs;
     state.put_settings(next)?;
     state.watcher.set_interval(Duration::from_secs(secs)).await;
+    state
+        .fetcher
+        .set_retry_delay(Duration::from_secs(secs))
+        .await;
     Ok(secs)
 }
 
@@ -1691,6 +1740,7 @@ pub fn run() {
                 let interval = settings.interval();
                 tauri::async_runtime::spawn(async move {
                     fetcher.set_network(network).await;
+                    fetcher.set_retry_delay(interval).await;
                     watcher.set_targets(targets).await;
                     watcher.set_interval(interval).await;
                     // 仅本地验收启动命令显式指定时恢复原有监控，普通启动仍保持暂停。
@@ -1750,6 +1800,8 @@ pub fn run() {
             get_settings,
             save_settings,
             test_clash_route,
+            juliang_status,
+            test_juliang_route,
             list_clash_nodes,
             select_clash_node,
             get_snapshot,

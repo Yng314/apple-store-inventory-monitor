@@ -186,6 +186,22 @@ pub enum NetworkMode {
     Pinned,
     /// 通过 Clash / mihomo 的专用端口查询，被拦时经控制接口切换节点。
     Clash,
+    /// 直接提取并复用巨量短效 HTTP 代理。
+    Juliang,
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct JuliangSettings {
+    pub api_url: String,
+}
+
+impl std::fmt::Debug for JuliangSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JuliangSettings")
+            .field("api_url", &"[已隐藏]")
+            .finish()
+    }
 }
 
 /// Clash / mihomo 线路设置。
@@ -229,10 +245,12 @@ impl Default for ClashSettings {
 pub struct NetworkSettings {
     pub mode: NetworkMode,
     pub clash: ClashSettings,
+    pub juliang: JuliangSettings,
 }
 
 impl NetworkSettings {
     fn normalize(&mut self) {
+        self.juliang.api_url = self.juliang.api_url.trim().to_string();
         let clash = &mut self.clash;
         clash.controller = clash.controller.trim().trim_end_matches('/').to_string();
         // Clash 界面显示的监听地址不带协议（如 127.0.0.1:9097），用户会直接照抄。
@@ -1018,6 +1036,21 @@ impl LegacySettings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn 动态代理配置可读取且调试输出不泄露提取签名() {
+        let value = serde_json::json!({
+            "network": {"mode": "juliang", "juliang": {"apiUrl": "http://v2.api.juliangip.com/company/dynamic/getips?sign=private-token"}}
+        });
+        let settings: super::Settings = serde_json::from_value(value).expect("支持动态代理配置");
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["network"]["mode"], "juliang");
+        assert!(!format!("{settings:?}").contains("private-token"));
+        assert_eq!(
+            saved["network"]["juliang"]["apiUrl"],
+            "http://v2.api.juliangip.com/company/dynamic/getips?sign=private-token"
+        );
+    }
+
     use super::*;
 
     fn 目标(store: &str, part: &str) -> Target {

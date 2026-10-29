@@ -30,6 +30,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungsten
 
 use crate::browser_support::startup_exit_detail;
 use crate::clash::ClashController;
+use crate::juliang::{JuliangPool, JuliangStatus};
 use crate::route_pool::RoutePool;
 
 const CHROME_START_TIMEOUT: Duration = Duration::from_secs(12);
@@ -273,7 +274,7 @@ fn save_startup_diagnostic(profile: &Path, browser: &Path, mode: &str, result: &
 /// 浏览器走专用端口，不改变系统代理。
 fn chromium_network_args(network: &NetworkSettings) -> Vec<String> {
     match network.mode {
-        NetworkMode::System => Vec::new(),
+        NetworkMode::System | NetworkMode::Juliang => Vec::new(),
         NetworkMode::Pinned | NetworkMode::Clash => vec![format!(
             "--proxy-server=http://127.0.0.1:{}",
             network.clash.proxy_port
@@ -1459,6 +1460,8 @@ struct QueryState {
     gate: RequestGate,
     cycle_reused_response_count: u32,
     network: NetworkSettings,
+    juliang: JuliangPool,
+    retry_delay: Duration,
     /// Clash 模式下的控制接口；地址无效时保存错误原因。
     clash: Option<Result<ClashController, String>>,
     routes: RoutePool,
@@ -1588,6 +1591,7 @@ impl QueryState {
     fn route_summary(&self) -> Option<String> {
         match self.network.mode {
             NetworkMode::System => None,
+            NetworkMode::Juliang => Some(self.route_label()),
             NetworkMode::Pinned => Some(format!("指定节点 {}", self.network.clash.pinned_node)),
             NetworkMode::Clash => Some(if let Some(failure) = &self.route_failure {
                 failure.clone()
@@ -1613,6 +1617,16 @@ impl QueryState {
     fn route_label(&self) -> String {
         match self.network.mode {
             NetworkMode::System => "系统代理".into(),
+            NetworkMode::Juliang => {
+                let status = self.juliang.status();
+                match (status.address, status.error) {
+                    (Some(address), _) => {
+                        format!("巨量 IP {address}（剩余 {} 秒）", status.remaining_seconds)
+                    }
+                    (_, Some(error)) => format!("巨量 IP：{error}"),
+                    _ => "巨量 IP 尚未提取".into(),
+                }
+            }
             NetworkMode::Pinned => format!("指定节点 {}", self.network.clash.pinned_node),
             NetworkMode::Clash => {
                 format!("Clash 节点 {}", self.routes.active().unwrap_or("尚未选定"))
@@ -1625,10 +1639,19 @@ impl QueryState {
         if self.network == network && self.clash.is_some() == uses_clash {
             return;
         }
-        if chromium_network_args(&self.network) != chromium_network_args(&network) {
+        let dynamic_changed =
+            self.network.mode != network.mode || self.network.juliang != network.juliang;
+        if chromium_network_args(&self.network) != chromium_network_args(&network)
+            || (dynamic_changed
+                && (self.network.mode == NetworkMode::Juliang
+                    || network.mode == NetworkMode::Juliang))
+        {
             // 代理参数只能在启动 Chromium 时指定，换线路方式必须重启浏览器。
             self.session = None;
             self.session_start_failure = None;
+        }
+        if dynamic_changed {
+            self.juliang = JuliangPool::default();
         }
         // 只改指定节点不影响轮换模式积累的冷却记录。
         let pool_settings = |clash: &apw_core::config::ClashSettings| {
@@ -1647,6 +1670,42 @@ impl QueryState {
         self.network = network;
         self.routes_loaded = false;
         self.route_failure = None;
+    }
+
+    async fn ensure_query_session(&mut self, profile_dir: PathBuf) -> Result<(), ApiError> {
+        let args = if self.network.mode == NetworkMode::Juliang {
+            let changed = self
+                .juliang
+                .ensure(&self.network.juliang.api_url, self.retry_delay)
+                .await
+                .map_err(ApiError::Transport)?;
+            if changed {
+                self.session = None;
+                eprintln!("{}", self.route_label());
+            }
+            let proxy = self
+                .juliang
+                .proxy_url()
+                .ok_or_else(|| ApiError::Transport("巨量 IP 尚无可用代理".into()))?;
+            vec![format!("--proxy-server={proxy}")]
+        } else {
+            chromium_network_args(&self.network)
+        };
+        if self.session.is_none() {
+            match ChromiumSession::start_with_args(profile_dir, &args).await {
+                Ok(session) => self.session = Some(session),
+                Err(error) => {
+                    self.session_start_failure = Some(match &error {
+                        ApiError::Transport(detail) | ApiError::BrowserUnavailable(detail) => {
+                            detail.clone()
+                        }
+                        _ => error.to_string(),
+                    });
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 是否处于自动切换节点的轮换模式。指定节点模式只固定使用一个节点。
@@ -1917,6 +1976,21 @@ impl QueryState {
             };
             attempts += 1;
             let result = result.map_err(|error| self.explain_proxy_error(error));
+            if self.network.mode == NetworkMode::Juliang {
+                let failure = match &result {
+                    Err(ApiError::Blocked(_) | ApiError::RateLimited(_)) => {
+                        Some("Apple 拒绝了当前代理，下轮更换")
+                    }
+                    Ok(payload) if is_rejected_payload(payload) => {
+                        Some("Apple 拒绝了当前代理，下轮更换")
+                    }
+                    Err(error) if is_node_failure(error) => Some("当前代理连接失败，下轮更换"),
+                    _ => None,
+                };
+                if let Some(failure) = failure {
+                    self.juliang.invalidate(failure.into(), self.retry_delay);
+                }
+            }
             let switch = match &result {
                 Err(ApiError::Blocked(_) | ApiError::RateLimited(_)) => self.route_rejected(region),
                 Ok(payload) if is_rejected_payload(payload) => self.route_rejected(region),
@@ -2000,7 +2074,10 @@ impl QueryState {
 impl AppleChromiumFetcher {
     pub fn new() -> Self {
         Self {
-            state: Arc::new(Mutex::new(QueryState::default())),
+            state: Arc::new(Mutex::new(QueryState {
+                retry_delay: Duration::from_secs(30),
+                ..QueryState::default()
+            })),
             profile_dir: chromium_profile_dir(),
         }
     }
@@ -2049,6 +2126,27 @@ impl AppleChromiumFetcher {
     /// 应用新的线路设置。代理参数变化时，下一次查询会重启专属浏览器。
     pub async fn set_network(&self, network: NetworkSettings) {
         self.state.lock().await.set_network(network);
+    }
+
+    pub async fn set_retry_delay(&self, delay: Duration) {
+        self.state.lock().await.retry_delay = delay;
+    }
+
+    pub async fn juliang_status(&self) -> JuliangStatus {
+        self.state.lock().await.juliang.status()
+    }
+
+    pub async fn juliang_proxy(&self) -> Result<String, String> {
+        let mut guard = self.state.lock().await;
+        let url = guard.network.juliang.api_url.clone();
+        let delay = guard.retry_delay;
+        if guard.juliang.ensure(&url, delay).await? {
+            guard.session = None;
+        }
+        guard
+            .juliang
+            .proxy_url()
+            .ok_or_else(|| "巨量 IP 尚无可用代理".into())
     }
 
     async fn pickup(
@@ -2126,24 +2224,7 @@ impl AppleChromiumFetcher {
             }
             (BrowserPayload { status: 200, body }, true)
         } else {
-            if guard.session.is_none() {
-                let network_args = chromium_network_args(&guard.network);
-                match ChromiumSession::start_with_args(self.profile_dir.clone(), &network_args)
-                    .await
-                {
-                    Ok(session) => guard.session = Some(session),
-                    Err(error) => {
-                        let detail = match &error {
-                            ApiError::Transport(detail) | ApiError::BrowserUnavailable(detail) => {
-                                detail.clone()
-                            }
-                            _ => error.to_string(),
-                        };
-                        guard.session_start_failure = Some(detail);
-                        return Err(error);
-                    }
-                }
-            }
+            guard.ensure_query_session(self.profile_dir.clone()).await?;
             let scope = if can_reuse_nearby && !nearby_unavailable {
                 PickupScope::Nearby(pickup_location.expect("附近查询必须有地点"))
             } else {
@@ -4291,6 +4372,43 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "提取一个付费代理并访问 Apple，专属临时浏览器，不触发通知或结账"]
+    async fn 真实巨量动态代理可以查询库存() {
+        let api_file = std::env::var_os("APW_JULIANG_API_FILE").expect("需指定本机提取链接文件");
+        let api_url = std::fs::read_to_string(api_file).expect("读取本机链接文件");
+        let profile = tempfile::tempdir().unwrap();
+        let fetcher = AppleChromiumFetcher {
+            state: Arc::new(Mutex::new(QueryState {
+                retry_delay: Duration::from_secs(30),
+                ..QueryState::default()
+            })),
+            profile_dir: profile.path().to_path_buf(),
+        };
+        fetcher
+            .set_network(NetworkSettings {
+                mode: NetworkMode::Juliang,
+                juliang: apw_core::config::JuliangSettings { api_url },
+                ..NetworkSettings::default()
+            })
+            .await;
+        let region = region_by_locale("zh_CN").unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(120),
+            fetcher.pickup(region, "R390", &[test_target("MG6X4CH/A")], None),
+        )
+        .await;
+        let status = fetcher.juliang_status().await;
+        println!("动态代理状态：{status:?}");
+        fetcher.shutdown().await;
+        let availability = result
+            .expect("库存查询在两分钟内完成")
+            .expect("代理完成真实 Apple 查询");
+        assert_eq!(availability.store_number, "R390");
+        assert!(availability.parts.contains_key("MG6X4CH/A"));
+        println!("门店 {} 库存响应已解析", availability.store_number);
+    }
+
+    #[tokio::test]
     #[ignore = "需要本机 Chromium 与 Apple 澳洲官网网络"]
     async fn 真实澳大利亚首页会话可以查询brisbane取货() {
         let region = region_by_locale("en_AU").expect("应当有澳大利亚地区配置");
@@ -4759,6 +4877,7 @@ pub(crate) mod tests {
         state.network = NetworkSettings {
             mode: NetworkMode::Clash,
             clash,
+            ..NetworkSettings::default()
         };
     }
 
@@ -5094,6 +5213,7 @@ pub(crate) mod tests {
             state.network = NetworkSettings {
                 mode: NetworkMode::Pinned,
                 clash,
+                ..NetworkSettings::default()
             };
         }
         let region = region_by_locale("zh_CN").unwrap();

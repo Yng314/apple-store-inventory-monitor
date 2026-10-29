@@ -118,6 +118,7 @@ fn 样例设置() -> Settings {
                 node_filter: "香港|日本".into(),
                 pinned_node: "DIRECT".into(),
             },
+            ..NetworkSettings::default()
         },
         checkout: CheckoutSettings {
             enabled: true,
@@ -614,6 +615,7 @@ fn 设置的线上格式是小驼峰() {
         obj.get("network"),
         Some(&serde_json::json!({
             "mode": "clash",
+            "juliang": { "apiUrl": "" },
             "clash": {
                 "controller": "http://127.0.0.1:9097",
                 "secret": "s3cret",
@@ -738,6 +740,7 @@ fn 线路设置规范化去掉空白与控制地址结尾斜杠() {
                 node_filter: " 香港|日本 ".into(),
                 pinned_node: "  ".into(),
             },
+            ..NetworkSettings::default()
         },
         ..Settings::default()
     };

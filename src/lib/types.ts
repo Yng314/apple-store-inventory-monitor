@@ -124,7 +124,14 @@ export interface Store {
 /** 检测到有货时自动打开的页面，与 Rust 侧 `OpenOnHit` 一一对应。 */
 export type OpenOnHit = "none" | "bag" | "education_bag" | "product";
 
-export type NetworkMode = "system" | "pinned" | "clash";
+export type NetworkMode = "system" | "pinned" | "clash" | "juliang";
+
+export interface JuliangStatus {
+  address: string | null;
+  remainingSeconds: number;
+  retryAfterSeconds: number;
+  error: string | null;
+}
 
 export interface ClashSettings {
   controller: string;
@@ -140,6 +147,7 @@ export interface ClashSettings {
 export interface NetworkSettings {
   mode: NetworkMode;
   clash: ClashSettings;
+  juliang: { apiUrl: string };
 }
 
 /** Bark 推送的中断级别，与 Rust 侧 `BarkLevel` 一一对应。 */

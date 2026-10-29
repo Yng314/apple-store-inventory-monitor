@@ -20,6 +20,7 @@ import type {
   CategoryOption,
   ClashRouteCheck,
   ClashSettings,
+  JuliangStatus,
   DeliveryLocalities,
   Product,
   Region,
@@ -99,6 +100,7 @@ const DEFAULT_SETTINGS: Settings = {
   stopOnHit: false,
   network: {
     mode: "system",
+    juliang: { apiUrl: "" },
     clash: {
       controller: "http://127.0.0.1:9097",
       secret: "",
@@ -560,6 +562,18 @@ export async function testClashRoute(clash: ClashSettings): Promise<ClashRouteCh
     const message = String(err);
     pushLog(`Clash 线路检查失败：${message}`);
     return message;
+  }
+}
+
+export async function getJuliangStatus(): Promise<JuliangStatus> {
+  return invoke<JuliangStatus>("juliang_status");
+}
+
+export async function testJuliangRoute(): Promise<JuliangStatus | string> {
+  try {
+    return await invoke<JuliangStatus>("test_juliang_route");
+  } catch (err) {
+    return String(err);
   }
 }
 
